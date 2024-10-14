@@ -5,6 +5,7 @@ package ssm
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"time"
 
@@ -89,6 +90,12 @@ func resourceParameter() *schema.Resource {
 				Type:       schema.TypeBool,
 				Optional:   true,
 				Deprecated: "this attribute has been deprecated",
+			},
+			"policies": {
+				Type:             schema.TypeString,
+				Optional:         true,
+				ValidateFunc:     validation.StringIsJSON,
+				DiffSuppressFunc: verify.SuppressEquivalentJSONDiffs,
 			},
 			names.AttrTags:    tftags.TagsSchema(),
 			names.AttrTagsAll: tftags.TagsSchemaComputed(),
@@ -175,6 +182,10 @@ func resourceParameterCreate(ctx context.Context, d *schema.ResourceData, meta i
 
 	if v, ok := d.GetOk("tier"); ok {
 		input.Tier = awstypes.ParameterTier(v.(string))
+	}
+
+	if v, ok := d.GetOk("policies"); ok {
+		input.Policies = aws.String(v.(string))
 	}
 
 	// AWS SSM Service only supports PutParameter requests with Tags
@@ -276,6 +287,43 @@ func resourceParameterRead(ctx context.Context, d *schema.ResourceData, meta int
 	d.Set(names.AttrKeyID, detail.KeyId)
 	d.Set("tier", detail.Tier)
 
+	// policies
+	describeInput := &ssm.DescribeParametersInput{
+		ParameterFilters: []awstypes.ParameterStringFilter{
+			{
+				Key:    aws.String("Name"),
+				Option: aws.String("Equals"),
+				Values: []string{d.Get(names.AttrName).(string)},
+			},
+		},
+	}
+	describeOutput, err := conn.DescribeParameters(ctx, describeInput)
+	if err != nil {
+		return sdkdiag.AppendErrorf(diags, "describing SSM Parameter (%s): %s", d.Id(), err)
+	}
+
+	if describeOutput.Parameters != nil && len(describeOutput.Parameters) > 0 && len(describeOutput.Parameters[0].Policies) > 0 {
+		var policies []interface{}
+
+		for _, policy := range describeOutput.Parameters[0].Policies {
+			var policyMap map[string]interface{}
+			err := json.Unmarshal([]byte(*policy.PolicyText), &policyMap)
+			if err != nil {
+				return sdkdiag.AppendErrorf(diags, "unmarshaling policy text for SSM Parameter (%s): %s", d.Id(), err)
+			}
+			policies = append(policies, policyMap)
+		}
+
+		policiesJson, err := json.Marshal(policies)
+		if err != nil {
+			return sdkdiag.AppendErrorf(diags, "marshaling combined policies for SSM Parameter (%s): %s", d.Id(), err)
+		}
+
+		d.Set("policies", string(policiesJson))
+	} else {
+		d.Set("policies", "")
+	}
+
 	return diags
 }
 
@@ -296,6 +344,10 @@ func resourceParameterUpdate(ctx context.Context, d *schema.ResourceData, meta i
 			Tier:           awstypes.ParameterTier(d.Get("tier").(string)),
 			Type:           typ,
 			Value:          aws.String(value),
+		}
+
+		if v, ok := d.GetOk("policies"); ok {
+			input.Policies = aws.String(v.(string))
 		}
 
 		if d.HasChange("data_type") {

@@ -6,6 +6,7 @@ package ssm_test
 import (
 	"context"
 	"fmt"
+	"github.com/hashicorp/terraform-provider-aws/internal/verify"
 	"testing"
 
 	"github.com/YakDriver/regexache"
@@ -24,6 +25,62 @@ import (
 	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
 	"github.com/hashicorp/terraform-provider-aws/names"
 )
+
+func TestAccSSMParameter_create_policy(t *testing.T) {
+	ctx := acctest.Context(t)
+	var param awstypes.Parameter
+	name := fmt.Sprintf("%s_%s", t.Name(), sdkacctest.RandString(10))
+	resourceName := "aws_ssm_parameter.test"
+
+	expectedPolicies := `[{"Attributes":{"Timestamp":"2030-12-31T23:59:59Z"},"Type":"Expiration","Version":"1.0"},{"Attributes":{"Before":"30","Unit":"Days"},"Type":"ExpirationNotification","Version":"1.0"}]`
+
+	resource.ParallelTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.SSMServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckParameterDestroy(ctx),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccParameterConfig_policy(name, "test2"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckParameterExists(ctx, resourceName, &param),
+					resource.TestCheckResourceAttr(resourceName, names.AttrValue, "test2"),
+					resource.TestCheckResourceAttr(resourceName, names.AttrType, "SecureString"),
+					resource.TestCheckResourceAttr(resourceName, "tier", string(awstypes.ParameterTierAdvanced)),
+					resource.TestCheckResourceAttrSet(resourceName, names.AttrVersion),
+					resource.TestCheckResourceAttrWith(resourceName, "policies", func(value string) error {
+						suppressDiff := verify.SuppressEquivalentJSONDiffs("", expectedPolicies, value, nil)
+						if !suppressDiff {
+							return fmt.Errorf("policies JSON does not match expected value")
+						}
+						return nil
+					}),
+					resource.TestCheckResourceAttr(resourceName, "data_type", "text"),
+					resource.TestCheckNoResourceAttr(resourceName, "overwrite"),
+				),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrTags), knownvalue.Null()),
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New(names.AttrTagsAll), knownvalue.MapExact(map[string]knownvalue.Check{})),
+				},
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			// Test import with version.
+			// https://github.com/hashicorp/terraform-provider-aws/issues/37812.
+			{
+				ResourceName:                         resourceName,
+				ImportState:                          true,
+				ImportStateId:                        name + ":1",
+				ImportStateVerify:                    true,
+				ImportStateVerifyIdentifierAttribute: names.AttrName,
+				ImportStateVerifyIgnore:              []string{names.AttrID, "overwrite"},
+			},
+		},
+	})
+}
 
 func TestAccSSMParameter_basic(t *testing.T) {
 	ctx := acctest.Context(t)
@@ -1483,4 +1540,32 @@ resource "aws_kms_alias" "test_alias" {
   target_key_id = aws_kms_key.test_key.id
 }
 `, rName, value, keyAlias)
+}
+func testAccParameterConfig_policy(rName string, value string) string {
+	return fmt.Sprintf(`
+resource "aws_ssm_parameter" "test" {
+  name        = "test_secure_parameter-%[1]s"
+  description = "description for parameter %[1]s"
+  type        = "SecureString"
+  value       = "%[2]s"
+  tier	      = "Advanced"
+  policies = jsonencode([
+    {
+      "Type": "Expiration",
+      "Version": "1.0",
+      "Attributes": {
+        "Timestamp": "2030-12-31T23:59:59Z"
+      }
+    },
+    {
+      "Type": "ExpirationNotification",
+      "Version": "1.0",
+      "Attributes": {
+        "Before": "30",
+        "Unit": "Days"
+      }
+    }
+  ])
+}
+`, rName, value)
 }
